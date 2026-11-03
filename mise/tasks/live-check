@@ -48,7 +48,8 @@ args=(
 # What the dialog's look reads (docs/skills/ui.md § Theming): noctalia's
 # settings, GTK's user CSS, which imports noctalia's palette, and the fonts.
 # Without them it falls back to the default palette and font, and the check
-# can't confirm the theming.
+# can't confirm the theming. The fonts are every directory the container's
+# fontconfig searches: a noctalia font found in none of them is substituted.
 config="${XDG_CONFIG_HOME:-$HOME/.config}"
 state="${XDG_STATE_HOME:-$HOME/.local/state}"
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -60,7 +61,9 @@ mount_ro "$state/noctalia" /root/.local/state/noctalia
 mount_ro "$config/gtk-4.0" /root/.config/gtk-4.0
 mount_ro "$config/fontconfig" /root/.config/fontconfig
 mount_ro "$data/fonts" /root/.local/share/fonts
+mount_ro "$HOME/.fonts" /root/.fonts
 mount_ro /usr/share/fonts /usr/local/share/fonts/host
+mount_ro /usr/local/share/fonts /usr/local/share/fonts/host-local
 
 podman run "${args[@]}" "$image" \
     sh -c 'chmod 700 /tmp/runtime && exec "$@"' live-check "${TEST[@]}"

@@ -32,7 +32,11 @@ each found the hard way on 2026-11-03:
   noctalia's palette) and the host fonts, the dialog renders in the fallback
   palette and the container's default font. It still works, so this is easy to
   mistake for a theming bug. The first run on 2026-11-03 had only the noctalia
-  settings mounted, and the operator rightly refused to tick the box.
+  settings mounted, and the operator rightly refused to tick the box. The fonts
+  are all four directories the container's fontconfig searches
+  (`/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`,
+  `~/.fonts`), each mounted only if it exists on the host; a font in an unmounted
+  one is silently substituted.
 - **`label=disable`** rather than `:z`/`:Z`, which would relabel the host's socket
   and config files.
 - **Its own `CARGO_TARGET_DIR`** under `target/`, so it never invalidates a host
