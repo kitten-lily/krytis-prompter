@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Run the test suite (release profile, locked dependencies); arguments go to cargo test"
+
+set -euo pipefail
+
+# Arguments are a cargo test filter: `mise run test <name>`. The tests spawn a
+# private bus, so dbus-daemon must be on the base system PATH (it is not a mise
+# tool); they need no display. docs/skills/ci.md § System libraries.
+cargo test --release --locked "$@"

@@ -1,0 +1,8 @@
+[Unit]
+Description=GTK4 Secret Service prompter
+Documentation=https://github.com/kitten-lily/krytis-prompter
+
+[Service]
+Type=dbus
+BusName=org.gnome.keyring.SystemPrompter
+ExecStart=/usr/bin/krytis-prompter

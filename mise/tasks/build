@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Build target/release/krytis-prompter (needs the gtk4, gtk4-layer-shell-0 and gcr-4 dev files)"
+
+set -euo pipefail
+
+# See mise/tasks/lint: a stray argument is a mistyped multi-task run.
+if [[ $# -gt 0 ]]; then
+    echo "build takes no arguments (got: $*). To run several tasks: mise run build ::: test" >&2
+    exit 2
+fi
+
+cargo build --release --locked

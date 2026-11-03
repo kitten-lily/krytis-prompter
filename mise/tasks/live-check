@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Open the real GTK prompt and verify a typed secret round-trip (interactive)"
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "live-check takes no arguments" >&2
+    exit 2
+fi
+
+cargo test --release --locked --test live -- --ignored --nocapture

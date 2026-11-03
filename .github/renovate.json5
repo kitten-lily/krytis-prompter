@@ -1,0 +1,111 @@
+// docs/skills/renovate.md explains each setting; check changes with
+// `mise run renovate-check --explain` and `--dry-run`.
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  // An allowlist. A custom manager is silently skipped unless "custom.regex"
+  // is listed too.
+  "enabledManagers": ["cargo", "mise", "github-actions", "custom.regex"],
+  "baseBranchPatterns": ["main"],
+  "pinDigests": true,
+  // Commits are made through the GitHub API, which signs them (verified).
+  "platformCommit": "enabled",
+  // Renovate's mise manager delegates lock refreshes to this exact binary.
+  // It must match every jdx/mise-action pin, or bot-generated mise.lock
+  // metadata can differ from CI. The custom manager below updates all four.
+  "constraints": {
+    // renovate: datasource=github-releases depName=jdx/mise
+    "mise": "2026.10.25",
+  },
+  // Renovate only bumps direct deps. Transitive crates in Cargo.lock (glib,
+  // the -sys crates and the rest) move only through lock file maintenance,
+  // which runs `cargo update` for Cargo.lock and `mise lock --bump` for
+  // mise.lock, on Renovate's default schedule (before 4am UTC on Monday), in
+  // one PR.
+  "lockFileMaintenance": { "enabled": true },
+  // RustSec advisories reach OSV directly. GitHub's Dependabot alerts stay on
+  // too, and also flag Cargo.lock's transitive crates:
+  // docs/skills/renovate.md § Vulnerability alerts.
+  "osvVulnerabilityAlerts": true,
+  "customManagers": [
+    {
+      // Keep Renovate's mise lock writer and all three CI installs on one
+      // version. The hosted app's github-actions manager extracts the action
+      // input and then drops it under pinDigests, as in krytis and
+      // presence-bridge: docs/skills/renovate.md § Silent drops under
+      // pinDigests. The annotations anchor both forms.
+      "customType": "regex",
+      "description": "mise version used by Renovate lock writes and jdx/mise-action steps",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/^\\.github/renovate\\.json5$/",
+      ],
+      "matchStrings": [
+        "# renovate: datasource=github-releases depName=jdx/mise\\s+version: (?<currentValue>[0-9][^\\s]*)",
+        "// renovate: datasource=github-releases depName=jdx/mise\\s+\"mise\": \"(?<currentValue>[0-9][^\"]*)\"",
+      ],
+      "depNameTemplate": "jdx/mise",
+      "datasourceTemplate": "github-releases",
+      // Releases are tagged v2026.10.18; the pins hold the bare version.
+      "extractVersionTemplate": "^v(?<version>.+)$",
+    },
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["digest", "pin", "patch", "minor"],
+      "automerge": true,
+      "automergeType": "pr",
+      // The repo's only enabled merge method (docs/skills/workflow.md § Merging).
+      "automergeStrategy": "merge-commit",
+    },
+    {
+      // Lock file maintenance waits for a human. It moves every transitive
+      // crate to its newest release, and minimumReleaseAge can't hold it back:
+      // the age check is per release, and this update has none.
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "automerge": false,
+      "prBodyNotes": [
+        ":warning: Moves every transitive crate in `Cargo.lock` to its newest release, with no release-age wait. Review the diff for crates published in the last day before merging.",
+      ],
+    },
+    {
+      // The requirements are bare majors or 0.x minors (`zbus = "6"`,
+      // `gtk4-layer-shell = "0.8"`) and Cargo.lock is committed, so an
+      // in-range release moves only Cargo.lock, and a new major (a new 0.x
+      // minor) rewrites the requirement. This is what cargo's "auto" resolves
+      // to; set here so it doesn't depend on that default.
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "update-lockfile",
+    },
+    {
+      // A crate update changes the binary krytis builds, so it is a `fix` and
+      // opens the release PR (release-plz.toml's release_commits). Every one
+      // here is lockfile-only (the rule above), and config:recommended's
+      // :semanticPrefixFixDepsChoreOthers types lockfile updates `chore` (its
+      // last rule, `isLockfileUpdate = true`), which this overrides. Lock file
+      // maintenance has its own update type and stays `chore`.
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "semanticCommitType": "fix",
+    },
+    {
+      // These auto-merge unattended, so a hijacked release should not
+      // land within hours of being published.
+      "matchManagers": ["cargo", "mise"],
+      "minimumReleaseAge": "1 day",
+    },
+    {
+      // The same wait for the mise binary CI installs. Matchers in one rule
+      // are ANDed, so this can't join the matchManagers rule above.
+      "matchDepNames": ["jdx/mise"],
+      "minimumReleaseAge": "1 day",
+    },
+    {
+      // krytis compiles this crate with freedesktop-sdk's Rust, so the pin
+      // moves with krytis's junction, by hand (docs/skills/mise.md § The Rust pin).
+      "matchManagers": ["mise"],
+      "matchDepNames": ["rust"],
+      "enabled": false,
+    },
+  ],
+}

@@ -1,0 +1,25 @@
+[package]
+name = "krytis-prompter"
+version = "0.1.0"
+edition = "2024"
+# The Rust krytis builds this with (freedesktop-sdk 26.08.4: rustc 1.99.1),
+# pinned in mise.toml.
+rust-version = "1.99"
+description = "Standalone GTK4 org.gnome.keyring.SystemPrompter for krytis"
+repository = "https://github.com/kitten-lily/krytis-prompter"
+license = "MIT"
+publish = false
+
+[dependencies]
+futures-channel = "0.3"
+futures-util = "0.3"
+gtk = { version = "0.11", package = "gtk4" }
+gtk4-layer-shell = "0.8"
+toml = "1"
+zbus = "6"
+zeroize = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
