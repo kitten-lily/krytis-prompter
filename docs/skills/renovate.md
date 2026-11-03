@@ -5,6 +5,14 @@ mise-action input versions. It opens PRs against `main`; patch/minor dependency
 updates may auto-merge only after required checks pass. Rust itself is disabled
 because it follows krytis's freedesktop-sdk compiler.
 
+## Hosted app provisioning
+
+Renovate runs as the hosted Mend Renovate app; there is no workflow in this
+repository. Land `.github/renovate.json5` on `main` before enabling the repository
+in Renovate's dashboard. If the app sees a default branch with no config, it opens
+an onboarding PR instead of applying this policy. After enabling it, the Dependency
+Dashboard issue is the proof that the hosted app indexed the repository.
+
 ## Auto-merge needs at least one check
 
 Renovate's platform auto-merge waits for branch protection and check results. A

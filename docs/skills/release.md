@@ -27,9 +27,21 @@ On a new repository, leave `RELEASE_APP_CLIENT_ID` unset. The workflow jobs skip
 until the app is installed and both that variable and `RELEASE_APP_PRIVATE_KEY`
 exist; otherwise every push to `main` would fail at token creation.
 
-The `v*` ruleset must permit that installed app to bypass tag creation. Do not
-leave an enforcing tag ruleset with no valid creator: that blocks the first
-release as well as automation.
+Provision the existing private `presence-bridge-release` App in this order:
+
+1. Install it on `kitten-lily/krytis-prompter`.
+2. Add `RELEASE_APP_PRIVATE_KEY` directly as an Actions secret; never pass the
+   private key through an issue, pull request or chat.
+3. Set `RELEASE_APP_CLIENT_ID` to `Iv23liqch7Rz6GD3ntTn`. Set this last because it
+   is the workflow's bootstrap guard.
+4. Create the `Release tags` ruleset for `refs/tags/v*`, with integration
+   `5271367` as an `always` bypass actor and creation, update, deletion and
+   non-fast-forward restricted.
+
+GitHub rejects step 4 with `Actor presence-bridge-release integration must be part
+of the ruleset source or owner organization` while the App is not installed. Do
+not work around that by creating the ruleset without a bypass: it makes every
+release tag impossible.
 
 ## Previewing a release
 
