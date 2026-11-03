@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+#MISE description="Validate .github/renovate.json5; --explain resolves packageRules, --dry-run lists pending updates"
+#USAGE flag "--explain" help="Resolve every packageRule to its enabled/auto-merge verdict per package and update type (offline)"
+#USAGE flag "--dry-run" help="Also run a local dry-run against the working tree (network: crates.io and GitHub lookups; no writes)"
+#USAGE flag "--log-level <level>" default="info" help="Renovate LOG_LEVEL; debug shows per-dependency extraction"
+
+# Ported from krytis's mise/tasks/renovate-check and scripts/renovate-explain.mjs
+# (https://github.com/starlit-os/krytis/blob/main/mise/tasks/renovate-check).
+# docs/skills/renovate.md § Checking the config.
+#
+# Renovate runs from its container, never `npx renovate`: npm resolves
+# `renovate@latest` against the host node's engines field, and on a node newer
+# than the release supports it falls back to an ancient major (37.x on node 26)
+# that validates against an outdated schema and reports nothing wrong. `:latest`
+# is deliberate: the hosted Mend app always runs the newest release.
+
+set -euo pipefail
+
+IMAGE="ghcr.io/renovatebot/renovate:latest"
+LOG_LEVEL="${usage_log_level:-info}"
+export LOG_LEVEL
+
+run_renovate() {
+    podman run --rm -i \
+        --pull=newer \
+        -v "$PWD:/repo:z" \
+        -w /repo \
+        -e LOG_LEVEL \
+        -e GITHUB_COM_TOKEN \
+        "$IMAGE" "$@"
+}
+
+echo "==> Validating .github/renovate.json5..."
+# No path argument: given one, the validator checks the file as *global* config
+# and skips the repo-level checks. --strict also fails on migration warnings.
+run_renovate renovate-config-validator --strict
+
+if [[ "${usage_explain:-}" == "true" ]]; then
+    # Renovate's own applyPackageRules(), against the real config: the dry-run
+    # stops before branches are built and never shows auto-merge. Inline, since
+    # AGENTS.md § Tasks and verification allows no scripts outside mise/tasks/.
+    run_renovate node --input-type=module - <<'EOF'
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+
+const HOME = '/usr/local/renovate/';
+const require = createRequire(HOME);
+const { applyPackageRules } = require(`${HOME}dist/util/package-rules/index.js`);
+const { get: managerApi } = require(`${HOME}dist/modules/manager/index.js`);
+const { resolveConfigPresets } = require(`${HOME}dist/config/presets/index.js`);
+const { getConfig } = require(`${HOME}dist/config/defaults.js`);
+const JSON5 = require('json5');
+// Without init() the logger prints a "not yet initialized" notice per call.
+process.env.LOG_LEVEL = 'fatal';
+await require(`${HOME}dist/logger/index.js`).init();
+
+const file = '.github/renovate.json5';
+const config = JSON5.parse(readFileSync(file, 'utf8'));
+// The rules as Renovate applies them, with config:recommended's presets
+// resolved: :semanticPrefixFixDepsChoreOthers decides each commit's type, which
+// release-plz.toml's release_commits reads. docs/skills/release.md § What opens
+// a release PR.
+const { config: resolved } = await resolveConfigPresets({ ...getConfig(), ...config });
+const managers = config.enabledManagers;
+const rules = config.packageRules ?? [];
+const updateTypes = ['digest', 'pin', 'patch', 'minor', 'major'];
+
+// A subject carries only a manager, a name, a depType and an update type, so a
+// rule matching on anything else (matchDatasources, matchFileNames, …), on a
+// name pattern, or on another update type is never exercised, and the rows it
+// should change would still read AUTO. Such a rule fails the run instead.
+const probed = new Set(['matchManagers', 'matchPackageNames', 'matchDepNames', 'matchDepTypes', 'matchUpdateTypes']);
+const isPattern = (name) => /^[!/]|[*?{]/.test(name);
+const unprobed = [];
+rules.forEach((rule, i) => {
+  const why = [
+    ...Object.keys(rule).filter((k) => k.startsWith('match') && !probed.has(k)),
+    ...[...(rule.matchPackageNames ?? []), ...(rule.matchDepNames ?? [])].filter(isPattern).map((n) => `pattern ${n}`),
+    ...(rule.matchUpdateTypes ?? []).filter((t) => ![...updateTypes, 'lockFileMaintenance'].includes(t)).map((t) => `update type ${t}`),
+  ];
+  if (why.length) unprobed.push(`packageRules[${i}]: ${why.join(', ')}`);
+});
+
+// Subjects come from the config: every name and depType a rule matches on,
+// under every manager the rule can apply to, plus one fall-through name per
+// manager that no rule names.
+const subjects = [];
+const seen = new Set();
+const add = (manager, name, depType) => {
+  const key = `${manager}\0${name}\0${depType}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  subjects.push({ manager, packageName: name, depName: name, depType });
+};
+for (const rule of rules) {
+  for (const manager of rule.matchManagers ?? managers) {
+    for (const name of [...(rule.matchPackageNames ?? []), ...(rule.matchDepNames ?? [])]) {
+      add(manager, name, rule.matchDepTypes?.[0]);
+    }
+    for (const depType of rule.matchDepTypes ?? []) add(manager, `any-${depType}`, depType);
+  }
+}
+for (const manager of managers) add(manager, '(any other package)', undefined);
+
+const verdict = (r) => (r.enabled === false ? 'off ' : r.automerge ? 'AUTO' : 'hold');
+// An update within the requirement is a lockfile update under
+// rangeStrategy "update-lockfile", and the presets type those differently.
+const resolve = async (subject) => {
+  const first = await applyPackageRules({ ...resolved, ...subject }, 'lookup');
+  const isLockfileUpdate =
+    first.rangeStrategy === 'update-lockfile' && ['patch', 'minor'].includes(subject.updateType);
+  return applyPackageRules({ ...resolved, ...subject, isLockfileUpdate }, 'lookup');
+};
+const cell = (r) => `${verdict(r)} ${(r.semanticCommitType ?? '-').padEnd(5)}`;
+const width = Math.max(...subjects.map((s) => s.packageName.length), '(lock file maintenance)'.length);
+console.log(`==> ${file}: off = no PR, AUTO = auto-merged, hold = PR awaits a human;`);
+console.log('    then the commit type (fix/chore) when semantic commits are on\n');
+for (const manager of managers) {
+  console.log(`  ${manager}`);
+  for (const s of subjects.filter((s) => s.manager === manager)) {
+    const cells = [];
+    for (const updateType of updateTypes) {
+      cells.push(`${updateType}=${cell(await resolve({ ...s, updateType }))}`);
+    }
+    console.log(`    ${s.packageName.padEnd(width)}  ${cells.join('  ')}`);
+  }
+  // Lock file maintenance is one update per manager, with no dependency, based
+  // on the top-level lockFileMaintenance object; all of them share one branch.
+  // A manager without supportsLockFileMaintenance (github-actions) never gets one.
+  if (!managerApi(manager, 'supportsLockFileMaintenance')) continue;
+  const lfm = { ...resolved, ...config.lockFileMaintenance, manager, updateType: 'lockFileMaintenance', isLockfileUpdate: true };
+  const r = await applyPackageRules(lfm, 'lookup');
+  console.log(`    ${'(lock file maintenance)'.padEnd(width)}  lockFileMaintenance=${cell(r)}`);
+}
+if (unprobed.length) {
+  console.error('\n==> The table ignores these rules, so rows they change are wrong:');
+  for (const line of unprobed) console.error(`    ${line}`);
+  console.error('    Extend the subjects in mise/tasks/renovate-check to cover them.');
+  process.exitCode = 1;
+}
+EOF
+fi
+
+if [[ "${usage_dry_run:-}" != "true" ]]; then
+    echo "==> Config valid. --dry-run lists the updates Renovate would open."
+    exit 0
+fi
+
+# The mise manager looks tools up on GitHub, which rate-limits anonymous calls.
+GITHUB_COM_TOKEN="${GITHUB_COM_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+export GITHUB_COM_TOKEN
+[[ -n "$GITHUB_COM_TOKEN" ]] || echo "    (no gh token: GitHub lookups will be rate-limited)"
+
+echo "==> Dry-running Renovate against the working tree (no writes)..."
+run_renovate renovate --platform=local --dry-run=full

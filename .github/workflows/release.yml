@@ -1,0 +1,95 @@
+name: Release
+
+# release-plz keeps a release PR open with the next version and changelog. Its
+# merge creates the v<version> tag and publishes a GitHub Release with that
+# version's changelog. There is nothing to attach: krytis tracks the tags and
+# builds the crate from source. docs/skills/release.md.
+
+on:
+  push:
+    branches: [main]
+
+# Writes go through the GitHub App token each job mints, scoped to that job.
+# The workflow's own GITHUB_TOKEN only reads, for the checkout.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    # Bootstrap guard: leave the variable unset until the App is installed and
+    # its private-key secret exists. An unprovisioned new repo must not fail
+    # every push to main.
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    # No concurrency group. A group keeps one pending run and cancels any older
+    # pending one, and `release` acts only on its own HEAD, so a release PR's
+    # merge queued behind a busy run would never be tagged. Runs can't collide:
+    # only the run for a release PR's merge does anything.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      # A GITHUB_TOKEN-made tag or PR triggers no workflows, so the release PR
+      # would get no Checks run (docs/skills/release.md § The token).
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Create the tag and the GitHub Release; find the PR HEAD came from.
+          permission-contents: write
+          permission-pull-requests: read
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # release-plz reads the v* tags and the history since the last one.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # The mise that last wrote mise.lock (docs/skills/ci.md § Pinning mise).
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.25
+
+      - name: Tag and release a merged release PR
+        run: mise run release
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+
+  release-pr:
+    name: Release PR
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    # After `release`: on the merge of a release PR, the new tag has to exist
+    # before the next version is worked out from it.
+    needs: release
+    # One at a time, so two runs don't push to the release branch at once. A
+    # newer pending run replacing an older one is fine: it sees a newer main.
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Commit to the release-plz-* branch and open or update its PR.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.25
+
+      - name: Open or update the release PR
+        run: mise run release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}

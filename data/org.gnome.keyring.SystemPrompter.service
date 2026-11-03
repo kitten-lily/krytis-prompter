@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.gnome.keyring.SystemPrompter
+Exec=/usr/bin/krytis-prompter
+SystemdService=krytis-prompter.service

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Open or update the release PR (run by .github/workflows/release.yml)"
+#MISE hide=true
+
+# GITHUB_TOKEN must be able to trigger workflows, or the PR gets no Checks run:
+# CI passes a GitHub App token. docs/skills/release.md § The token.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "release-pr takes no arguments (got: $*)" >&2
+    exit 2
+fi
+
+: "${GITHUB_TOKEN:?release-pr needs GITHUB_TOKEN}"
+release-plz release-pr --git-token "$GITHUB_TOKEN"

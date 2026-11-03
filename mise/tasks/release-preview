@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#MISE description="Show the version and CHANGELOG.md the next release PR would carry, without touching the checkout"
+
+# Runs `release-plz update` in a throwaway worktree of HEAD, with the working
+# tree's release-plz.toml copied in so an uncommitted config edit shows up.
+# Tags come from the shared repository, so fetch them first if they may be
+# behind origin. docs/skills/release.md § Previewing a release.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "release-preview takes no arguments (got: $*)" >&2
+    exit 2
+fi
+
+tmp="$(mktemp -d)"
+cleanup() {
+    git worktree remove --force "$tmp/wt" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+git worktree add --quiet --detach "$tmp/wt" HEAD
+cp release-plz.toml "$tmp/wt/release-plz.toml"
+
+echo "==> release-plz update (in a throwaway worktree of $(git rev-parse --short HEAD))..."
+# --allow-dirty: the copied config may differ from HEAD's.
+(cd "$tmp/wt" && release-plz update --allow-dirty)
+
+echo "==> Cargo.toml"
+git -C "$tmp/wt" --no-pager diff -- Cargo.toml
+echo "==> CHANGELOG.md"
+if git -C "$tmp/wt" ls-files --error-unmatch CHANGELOG.md >/dev/null 2>&1; then
+    git -C "$tmp/wt" --no-pager diff -- CHANGELOG.md
+elif [[ -f "$tmp/wt/CHANGELOG.md" ]]; then
+    cat "$tmp/wt/CHANGELOG.md"
+else
+    echo "(no changes)"
+fi

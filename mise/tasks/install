@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Build and install the binary, D-Bus activation file, and user unit under DESTDIR/usr"
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "install takes no arguments; set DESTDIR for a staged install" >&2
+    exit 2
+fi
+
+root="${DESTDIR:-}/usr"
+target_dir="${CARGO_TARGET_DIR:-target}"
+cargo build --release --locked
+install -Dm755 "$target_dir/release/krytis-prompter" "$root/bin/krytis-prompter"
+install -Dm644 data/org.gnome.keyring.SystemPrompter.service \
+    "$root/share/dbus-1/services/org.gnome.keyring.SystemPrompter.service"
+install -Dm644 systemd/krytis-prompter.service \
+    "$root/lib/systemd/user/krytis-prompter.service"

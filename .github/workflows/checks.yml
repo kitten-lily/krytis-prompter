@@ -1,0 +1,64 @@
+name: Checks
+
+# The gates AGENTS.md § Tasks and verification asks of every PR. Renovate
+# auto-merges only once these are green: with no check at all a PR's status
+# stays pending and nothing merges (docs/skills/renovate.md § Auto-merge needs
+# at least one check).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system build dependencies
+        # The gtk4, gtk4-layer-shell and gcr-4 crates' -sys builds find their C
+        # libraries through pkg-config, and the tests spawn a private bus with
+        # dbus-daemon. Names checked on packages.ubuntu.com for resolute
+        # (26.04 LTS) on 2026-11-03: libgtk-4-dev 4.22.2, libgtk4-layer-shell-dev
+        # 1.3.0, libgcr-4-dev 4.4.0.1, pkgconf 2.5.1 (pkg-config is only its
+        # transitional package), dbus-daemon 1.16.2. Not a mise task: it
+        # provisions the runner, and krytis hosts have no apt
+        # (docs/skills/ci.md § System libraries).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libgtk4-layer-shell-dev libgcr-4-dev pkgconf dbus-daemon
+
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # Without a version the action keeps whatever mise the runner has, or
+          # takes the newest; mise.lock's contents depend on which mise wrote it
+          # (docs/skills/mise.md § mise.lock). The action adds --locked to
+          # `mise install` itself when mise.lock exists.
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.25
+
+      - name: mise.lock matches mise.toml
+        run: mise run mise-lock --check
+
+      - name: Rust is the pinned toolchain
+        run: mise run toolchain-check
+
+      - name: Lint and test
+        # Quoted: in a plain scalar, `::: ` is a mapping key and the file fails
+        # to parse (docs/skills/ci.md § Writing the workflow).
+        run: "mise run lint ::: test"
+
+      - name: Docs references
+        run: mise run docs-links

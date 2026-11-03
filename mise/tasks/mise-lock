@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#MISE description="Write/refresh mise.lock for the pinned tool versions in mise.toml"
+#USAGE flag "--check" help="Fail if the committed mise.lock is out of date (leaves the refreshed file in place)"
+#USAGE flag "--platform <list>" default="linux-x64" help="Comma-separated platforms to record checksums/URLs for"
+
+# From krytis's mise/tasks/mise-lock
+# (https://github.com/starlit-os/krytis/blob/main/mise/tasks/mise-lock).
+#
+# What ends up in mise.lock depends on which command wrote it: `mise install`
+# creates the file in passing with whatever it happened to resolve. This task
+# writes it deterministically, for the platforms named.
+#
+# Any mise command that resolves tools may rewrite the file, so a stale
+# mise.lock heals in the working tree the moment someone runs a task. What does
+# not heal is the copy committed to git, so --check compares against git, not
+# against a pre-run copy. docs/skills/mise.md § mise.lock.
+
+set -euo pipefail
+
+CHECK=$([[ "${usage_check:-}" == "true" ]] && echo 1 || echo 0)
+PLATFORM="${usage_platform:-linux-x64}"
+
+echo "==> Locking tools for ${PLATFORM}..."
+mise lock --platform "$PLATFORM"
+
+if [[ "$CHECK" -eq 1 ]]; then
+    # Against HEAD, not the index: a refreshed lock that is only staged, or
+    # staged but never committed, is still behind what git has.
+    if ! git cat-file -e HEAD:mise.lock 2>/dev/null || ! git diff --quiet HEAD -- mise.lock; then
+        echo "==> The committed mise.lock does not match mise.toml:" >&2
+        git --no-pager diff HEAD -- mise.lock >&2
+        echo "==> Commit the refreshed mise.lock (already written above)." >&2
+        exit 1
+    fi
+    echo "==> mise.lock is up to date with mise.toml."
+    exit 0
+fi
+
+echo "==> mise.lock written. Commit it alongside the mise.toml change."

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Tag and publish a GitHub Release if HEAD is a merged release PR (run by .github/workflows/release.yml)"
+#USAGE flag "--dry-run" help="Report what would be tagged and released, and create nothing"
+
+# release_always = false: on any commit that isn't from a release-plz-* PR this
+# logs "skipping release" and exits 0. GITHUB_TOKEN is CI's App token; locally
+# it is borrowed from gh, to look up the PR a commit came from.
+# docs/skills/release.md § Cutting a release.
+
+set -euo pipefail
+
+GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+: "${GITHUB_TOKEN:?release needs GITHUB_TOKEN, or a logged-in gh}"
+
+args=()
+[[ "${usage_dry_run:-}" == "true" ]] && args+=(--dry-run)
+
+release-plz release --git-token "$GITHUB_TOKEN" "${args[@]}"

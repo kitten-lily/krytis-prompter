@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#MISE description="Fail unless rustc and cargo are the Rust pinned in mise.toml"
+
+# mise selects Rust only by setting RUSTUP_TOOLCHAIN over the shared ~/.rustup,
+# and mise.lock records no checksum or URL for core:rust, so `mise install
+# --locked` proves nothing about which rustc runs. A runner image ships its own
+# stable toolchain. docs/skills/ci.md § The Rust toolchain.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "toolchain-check takes no arguments (got: $*). To run several tasks: mise run a ::: b" >&2
+    exit 2
+fi
+
+want="$(mise current rust)"
+rc=0
+for tool in rustc cargo; do
+    got="$("$tool" --version)"
+    case "$got" in
+        "$tool $want "*) echo "$got" ;;
+        *) echo "toolchain-check: want $tool $want, got: $got" >&2; rc=1 ;;
+    esac
+done
+exit "$rc"

@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#MISE description="Verify docs/ paths, markdown links, backticked repo paths, § citations and mise task names resolve"
+
+# Cut down from krytis's mise/tasks/docs-links
+# (https://github.com/starlit-os/krytis/blob/main/mise/tasks/docs-links), which
+# explains each check's history. Five classes of reference, across tracked and
+# untracked text files:
+#
+#   1. Repo-root-relative `docs/<name>.md` paths, anywhere. The lookbehind keeps
+#      it out of URLs, so a krytis doc cited by URL is not reported here.
+#   2. Markdown inline links `](target)`, resolved relative to the linking file.
+#   3. Backticked paths under src/ tests/ data/ mise/ systemd/, and `Makefile`,
+#      in markdown.
+#   4. Backticked `mise run <task>` invocations, in markdown.
+#   5. `<file>.md § <heading>` citations: the heading (or a **bold lead**) must
+#      exist in that file. A rename rots citers its diff never touches.
+#
+# `--untracked` on every git grep is load-bearing: plain git grep only sees the
+# index, so a doc written but not yet `git add`ed would pass here and fail in CI.
+#
+# CHANGELOG.md is skipped. release-plz writes it from commit subjects, and it is
+# a record of what each release said: a reference in it that later stops
+# resolving is history, not something to fix. docs/skills/release.md § The changelog.
+
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+NOT_CHANGELOG=':(exclude)CHANGELOG.md'
+
+fail=0
+
+report() {
+    printf '  %s:%s → %s\n' "$1" "$2" "$3"
+    fail=1
+}
+
+echo "==> Checking docs/ path references..."
+while IFS=: read -r file line ref; do
+    [ -e "$ref" ] && continue
+    report "$file" "$line" "missing path $ref"
+done < <(git grep --untracked -I -noP '(?<![A-Za-z0-9._/-])docs/[A-Za-z0-9._/-]+\.md' -- . "$NOT_CHANGELOG")
+
+echo "==> Checking markdown links..."
+while IFS=: read -r file line target; do
+    # A destination may be wrapped in <…> and followed by a title ("…" or '…').
+    # Unwrapped, it can't contain a space, so the first space ends it.
+    case "$target" in
+        '<'*) target="${target#<}" target="${target%%>*}" ;;
+        *) target="${target%% *}" ;;
+    esac
+    case "$target" in
+        http://* | https://* | mailto:* | '#'*) continue ;;
+    esac
+    target="${target%%#*}"
+    [ -n "$target" ] || continue
+    [ -e "$(dirname "$file")/$target" ] && continue
+    report "$file" "$line" "broken link $target"
+done < <(git grep --untracked -I -noE '\]\([^)]+\)' -- '*.md' "$NOT_CHANGELOG" |
+    sed -E 's/^([^:]*):([0-9]+):\]\((.*)\)$/\1:\2:\3/')
+
+# Tasks are file tasks: mise/tasks/<group>/<name> is "group:name".
+declare -A TASKS=()
+while IFS= read -r t; do
+    TASKS["${t#mise/tasks/}"]=1
+done < <(git ls-files --cached --others --exclude-standard 'mise/tasks/*' | sed 's|/|:|3')
+
+# Backticked spans, once, for checks 3 and 4. `-o` emits one match per line with
+# its line number, so several spans on one line all land.
+backticks="$(git grep --untracked -I -noP '`[^`]+`' -- '*.md' "$NOT_CHANGELOG" |
+    sed -E 's/^([^:]*):([0-9]+):`(.*)`$/\1:\2:\3/')"
+
+echo "==> Checking backticked repo paths..."
+while IFS=: read -r file line ref; do
+    case "$ref" in
+        src/* | tests/* | data/* | mise/* | systemd/* | Makefile | Makefile:*) ;;
+        *) continue ;;
+    esac
+    # Placeholders, brace expansions and globs name a shape, not a file. A
+    # trailing `:12` or `:12-20` is a line citation.
+    case "$ref" in
+        *[\<\>\{\}\*\ ]* | *…*) continue ;;
+    esac
+    ref="${ref%%:[0-9]*}"
+    ref="${ref%[.,;]}"
+    [ -e "$ref" ] && continue
+    git check-ignore -q "$ref" && continue
+    report "$file" "$line" "missing path $ref"
+done <<<"$backticks"
+
+echo "==> Checking mise task references..."
+while IFS=: read -r file line ref; do
+    case "$ref" in
+        "mise run "*) ;;
+        *) continue ;;
+    esac
+    task="${ref#mise run }"
+    task="${task%% *}"
+    case "$task" in
+        '' | -* | *[!a-z0-9:_-]*) continue ;;
+    esac
+    [ -n "${TASKS[$task]:-}" ] && continue
+    report "$file" "$line" "unknown mise task $task"
+done <<<"$backticks"
+
+declare -A ANCHORS=()
+
+normalize() {
+    printf '%s' "$1" | tr 'A-Z' 'a-z' |
+        sed -E 's/[`*_"“”]//g; s/[.,;:—–]+/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+echo "==> Checking § section citations..."
+while IFS=: read -r file line ref; do
+    path="${ref%%§*}"
+    frag="${ref#*§}"
+    path="$(printf '%s' "$path" | sed -E 's/[`) ]+$//')"
+    # Repo-root path first (`README.md`, `docs/skills/protocol.md`), then relative to
+    # the citing file. A citation of another repo's file resolves to neither and
+    # is skipped: cite those by URL.
+    target="$path"
+    [ -f "$target" ] || target="$(dirname "$file")/$path"
+    [ -f "$target" ] || continue
+    # Citations run on into prose; cut at the first separator an anchor can't hold.
+    frag="$(printf '%s' "$frag" | sed -E 's/ — .*$//; s/ – .*$//; s/[;|)].*$//; s/\. .*$//; s/…+$//' |
+        sed -E 's/ (for|explains|shows|says|and it) .*$//')"
+    key="$(normalize "$frag" | cut -d' ' -f1-3)"
+    # One word can't tell anchors apart. krytis requires three, which on its
+    # 50-file tree cuts spurious matches; most headings here are two words.
+    [ "$(printf '%s' "$key" | wc -w)" -ge 2 ] || continue
+    if [ -z "${ANCHORS[$target]:-}" ]; then
+        ANCHORS["$target"]="$(sed -nE 's/^#{2,}[[:space:]]+//p; s/^\*\*([^*]+)\*\*.*/\1/p' "$target" |
+            while IFS= read -r a; do normalize "$a"; done)"
+    fi
+    printf '%s\n' "${ANCHORS[$target]}" | grep -qF -- "$key" && continue
+    report "$file" "$line" "no such section in $target: § $frag"
+done < <(git grep --untracked -I -noP '[A-Za-z0-9._/-]+\.md`?\)?[[:space:]]*§+[[:space:]]*[^|;)]+' -- . "$NOT_CHANGELOG")
+
+if [ "$fail" -ne 0 ]; then
+    echo "==> docs-links FAILED — fix the references above."
+    exit 1
+fi
+
+echo "==> docs-links passed."
