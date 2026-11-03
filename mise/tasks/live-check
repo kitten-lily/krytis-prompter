@@ -1,11 +1,66 @@
 #!/usr/bin/env bash
 #MISE description="Open the real GTK prompt and verify a typed secret round-trip (interactive)"
+#USAGE flag "--container" help="Build and run it in an Ubuntu container (podman) on this session's Wayland display, for hosts without the GTK 4, gtk4-layer-shell and gcr-4 dev files"
 
 set -euo pipefail
 
-if [[ $# -gt 0 ]]; then
-    echo "live-check takes no arguments" >&2
-    exit 2
+TEST=(cargo test --release --locked --test live -- --ignored --nocapture)
+
+if [[ "${usage_container:-}" != "true" ]]; then
+    if ! pkg-config --exists gtk4 gtk4-layer-shell-0 gcr-4 2>/dev/null; then
+        echo "live-check: no GTK 4, gtk4-layer-shell or gcr-4 dev files here (pkg-config)." >&2
+        echo "On a krytis host, run: mise run live-check --container" >&2
+        exit 1
+    fi
+    exec "${TEST[@]}"
 fi
 
-cargo test --release --locked --test live -- --ignored --nocapture
+# docs/skills/ui.md § The live check in a container.
+runtime="${XDG_RUNTIME_DIR:?live-check needs XDG_RUNTIME_DIR}"
+display="${WAYLAND_DISPLAY:?live-check needs a Wayland session (WAYLAND_DISPLAY is unset)}"
+[[ "$display" == /* ]] || display="$runtime/$display"
+if [[ ! -S "$display" ]]; then
+    echo "live-check: no Wayland socket at $display" >&2
+    exit 1
+fi
+
+image=localhost/krytis-prompter-live-check
+podman build --tag "$image" --build-arg "RUST_VERSION=$(mise current rust)" \
+    --file containers/live-check.Containerfile containers/
+
+# Root in a rootless container is the invoking user, so it can use the Wayland
+# socket and write target/. SELinux labelling is disabled rather than relabel
+# the host's socket and config (:z/:Z would).
+args=(
+    --rm --user 0 --security-opt label=disable
+    -e HOME=/root -e XDG_RUNTIME_DIR=/tmp/runtime -e WAYLAND_DISPLAY=wayland-0
+    # No accessibility bus in the container; GTK warns once without this.
+    -e GTK_A11Y=none
+    # Apart from the host's target/: a different toolchain path would make the
+    # two builds invalidate each other.
+    -e CARGO_TARGET_DIR=/repo/target/live-check-container
+    -v "$display:/tmp/runtime/wayland-0"
+    -v krytis-prompter-cargo-registry:/opt/cargo/registry
+    -v "$PWD:/repo" -w /repo
+)
+[[ -e /dev/dri ]] && args+=(--device /dev/dri)
+
+# What the dialog's look reads (docs/skills/ui.md § Theming): noctalia's
+# settings, GTK's user CSS, which imports noctalia's palette, and the fonts.
+# Without them it falls back to the default palette and font, and the check
+# can't confirm the theming.
+config="${XDG_CONFIG_HOME:-$HOME/.config}"
+state="${XDG_STATE_HOME:-$HOME/.local/state}"
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+mount_ro() {
+    if [[ -e "$1" ]]; then args+=(-v "$1:$2:ro"); fi
+}
+mount_ro "$config/noctalia" /root/.config/noctalia
+mount_ro "$state/noctalia" /root/.local/state/noctalia
+mount_ro "$config/gtk-4.0" /root/.config/gtk-4.0
+mount_ro "$config/fontconfig" /root/.config/fontconfig
+mount_ro "$data/fonts" /root/.local/share/fonts
+mount_ro /usr/share/fonts /usr/local/share/fonts/host
+
+podman run "${args[@]}" "$image" \
+    sh -c 'chmod 700 /tmp/runtime && exec "$@"' live-check "${TEST[@]}"

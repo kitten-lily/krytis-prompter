@@ -1,9 +1,12 @@
 # Renovate
 
-Renovate updates Cargo dependencies, mise tools, GitHub Actions, and annotated
-mise-action input versions. It opens PRs against `main`; patch/minor dependency
-updates may auto-merge only after required checks pass. Rust itself is disabled
-because it follows krytis's freedesktop-sdk compiler.
+Renovate updates Cargo dependencies, mise tools, GitHub Actions, annotated
+mise-action input versions, and the base image digest of
+`containers/live-check.Containerfile`. It opens PRs against `main`; patch/minor
+dependency updates may auto-merge only after required checks pass. Rust itself is
+disabled because it follows krytis's freedesktop-sdk compiler. The Containerfile's
+Ubuntu takes digest updates only: it mirrors CI's `ubuntu-26.04` runner, and moves
+to a new release together with `.github/workflows/checks.yml`.
 
 ## Hosted app provisioning
 

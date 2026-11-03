@@ -4,8 +4,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   // An allowlist. A custom manager is silently skipped unless "custom.regex"
-  // is listed too.
-  "enabledManagers": ["cargo", "mise", "github-actions", "custom.regex"],
+  // is listed too. "dockerfile" covers containers/live-check.Containerfile.
+  "enabledManagers": ["cargo", "mise", "github-actions", "dockerfile", "custom.regex"],
   "baseBranchPatterns": ["main"],
   "pinDigests": true,
   // Commits are made through the GitHub API, which signs them (verified).
@@ -105,6 +105,15 @@
       // moves with krytis's junction, by hand (docs/skills/mise.md § The Rust pin).
       "matchManagers": ["mise"],
       "matchDepNames": ["rust"],
+      "enabled": false,
+    },
+    {
+      // The live-check container mirrors CI's ubuntu-26.04 runner
+      // (docs/skills/ui.md § The live check in a container), so it takes only
+      // digest updates of 26.04, never a newer Ubuntu release.
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["docker.io/library/ubuntu"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
       "enabled": false,
     },
   ],
