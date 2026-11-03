@@ -1,6 +1,6 @@
 [package]
 name = "krytis-prompter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # The Rust krytis builds this with (freedesktop-sdk 26.08.4: rustc 1.99.1),
 # pinned in mise.toml.
