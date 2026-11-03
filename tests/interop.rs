@@ -70,14 +70,19 @@ fn real_gcr_client_and_lifecycle() {
 /// that call as soon as the name is claimed: before the daemon would read
 /// anything if it subscribed to its connection only after claiming. The caller
 /// then got no reply, the idle timer exited the daemon, and gcr's client gave
-/// up with "Operation was cancelled" (krytis's `mise run krytis-prompter-test`,
-/// 2026-11-03). Here the call is on the wire while the daemon is held between
-/// connecting and claiming the name.
+/// up with "Operation was cancelled" (krytis's artifact gate, 2026-11-03).
+///
+/// Here the call reaches the daemon while it is held between connecting and
+/// claiming the name. "Reaches" is proven, not waited for: dbus-daemon handles
+/// one connection's messages in order, so once it answers the client's GetId it
+/// has already routed the BeginPrompting sent before it. Only then is the
+/// daemon released, so a slow runner can't let the test pass vacuously.
 fn activating_call_is_served() {
     let bus = Bus::start();
     let held = start_daemon_held(&bus);
     let address = bus.address.clone();
     let destination = held.unique_name.clone();
+    let (routed_tx, routed_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     let client = thread::spawn(move || {
         let ctx = glib::MainContext::new();
@@ -88,20 +93,38 @@ fn activating_call_is_served() {
                 let conn = zbus::connection::Builder::address(address.as_str()).build().await.unwrap();
                 let callback = OwnedObjectPath::try_from("/test/Activated").unwrap();
                 conn.object_server().at(callback.clone(), Callback { ready, done }).await.unwrap();
-                let proxy = zbus::Proxy::new(&conn, destination.as_str(), PATH, INTERFACE).await.unwrap();
-                let begun = proxy.call_method("BeginPrompting", &callback).await.map(|_| ());
-                let ready = match begun {
-                    Ok(()) => ready_rx.next().await.is_some(),
-                    Err(_) => false,
+
+                // Sent by hand, not through a proxy, so the reply wait can start
+                // after the barrier below.
+                let mut replies = zbus::MessageStream::from(&conn);
+                let begin = zbus::Message::method_call(PATH, "BeginPrompting")
+                    .destination(destination.as_str())
+                    .interface(INTERFACE)
+                    .build(&(&callback,))
+                    .unwrap();
+                let serial = begin.primary_header().serial_num();
+                conn.send(&begin).await.unwrap();
+                zbus::fdo::DBusProxy::new(&conn).await.unwrap().get_id().await.unwrap();
+                routed_tx.send(()).unwrap();
+
+                let begun = loop {
+                    let Some(Ok(msg)) = replies.next().await else { break Err("stream ended".to_string()) };
+                    if msg.header().reply_serial() != Some(serial) {
+                        continue;
+                    }
+                    break match msg.message_type() {
+                        zbus::message::Type::MethodReturn => Ok(()),
+                        other => Err(format!("{other:?}: {msg:?}")),
+                    };
                 };
-                result_tx.send((begun.map_err(|e| e.to_string()), ready)).unwrap();
+                let ready = begun.is_ok() && ready_rx.next().await.is_some();
+                result_tx.send((begun, ready)).unwrap();
             });
         })
         .unwrap();
     });
 
-    // Let the call reach the daemon's connection before it claims the name.
-    thread::sleep(Duration::from_millis(300));
+    routed_rx.recv_timeout(Duration::from_secs(5)).expect("the client never routed its BeginPrompting");
     held.go.send(()).unwrap();
     let (begun, ready) =
         result_rx.recv_timeout(Duration::from_secs(5)).expect("the activating BeginPrompting got no reply");
