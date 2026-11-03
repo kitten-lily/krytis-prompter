@@ -12,8 +12,9 @@ callback object path.
 3. `PerformPrompt(callback, type, properties, exchange)` updates persistent
    properties and opens either a password or confirm prompt.
 4. The answer is `PromptReady("yes"|"no", changed_properties, exchange)`.
-5. `StopPrompting(callback)` closes the UI, sends `PromptDone()`, and advances the
-   queue.
+5. `StopPrompting(callback)` closes an active UI, sends `PromptDone()`, and
+   advances the queue. A caller may stop while it is still queued; it still
+   receives `PromptDone()` even though it never received `PromptReady()`.
 
 Only one session is active. A `NameOwnerChanged` signal with no new owner removes
 all work belonging to that unique name. No `PromptDone` is sent to a vanished

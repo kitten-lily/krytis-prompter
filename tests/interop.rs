@@ -54,8 +54,8 @@ fn real_gcr_client_and_lifecycle() {
     assert!(matches!(daemon.ui.wait_events(7).last(), Some(UiEvent::Close)));
 
     queue_waits_for_the_active_session(&daemon.ui);
+    queued_stop_sends_prompt_done(&bus);
     caller_disconnect_closes_the_active_prompt(&bus, &daemon.ui);
-
     // A separate bus proves the daemon's idle timer exits it. The active daemon
     // above has no timeout and remains available to the GIO connection cached
     // by the real gcr client.
@@ -87,8 +87,35 @@ fn queue_waits_for_the_active_session(ui: &common::Ui) {
     second.join().unwrap();
 }
 
+fn queued_stop_sends_prompt_done(bus: &Bus) {
+    let active = GcrPrompt::open(10).unwrap();
+    let address = bus.address.clone();
+    let client = thread::spawn(move || {
+        let ctx = glib::MainContext::new();
+        ctx.with_thread_default(|| {
+            ctx.block_on(async move {
+                let (ready, _ready_rx) = futures_channel::mpsc::unbounded();
+                let (done, mut done_rx) = futures_channel::mpsc::unbounded();
+                let conn = zbus::connection::Builder::address(address.as_str()).build().await.unwrap();
+                let callback = OwnedObjectPath::try_from("/test/QueuedPrompt").unwrap();
+                conn.object_server().at(callback.clone(), Callback { ready, done }).await.unwrap();
+                let proxy = zbus::Proxy::new(&conn, daemon::BUS_NAME, PATH, INTERFACE).await.unwrap();
+
+                proxy.call_method("BeginPrompting", &callback).await.unwrap();
+                proxy.call_method("StopPrompting", &callback).await.unwrap();
+                done_rx.next().await.expect("queued StopPrompting sends PromptDone");
+            });
+        })
+        .unwrap();
+    });
+
+    client.join().unwrap();
+    active.close().unwrap();
+}
+
 struct Callback {
     ready: futures_channel::mpsc::UnboundedSender<()>,
+    done: futures_channel::mpsc::UnboundedSender<()>,
 }
 
 #[zbus::interface(name = "org.gnome.keyring.internal.Prompter.Callback")]
@@ -97,7 +124,9 @@ impl Callback {
         let _ = self.ready.unbounded_send(());
     }
 
-    async fn prompt_done(&self) {}
+    async fn prompt_done(&self) {
+        let _ = self.done.unbounded_send(());
+    }
 }
 
 fn caller_disconnect_closes_the_active_prompt(bus: &Bus, ui: &common::Ui) {
@@ -111,9 +140,10 @@ fn caller_disconnect_closes_the_active_prompt(bus: &Bus, ui: &common::Ui) {
         ctx.with_thread_default(|| {
             ctx.block_on(async move {
                 let (ready, mut ready_rx) = futures_channel::mpsc::unbounded();
+                let (done, _done_rx) = futures_channel::mpsc::unbounded();
                 let conn = zbus::connection::Builder::address(address.as_str()).build().await.unwrap();
                 let callback = OwnedObjectPath::try_from("/test/Prompt").unwrap();
-                conn.object_server().at(callback.clone(), Callback { ready }).await.unwrap();
+                conn.object_server().at(callback.clone(), Callback { ready, done }).await.unwrap();
                 let proxy = zbus::Proxy::new(&conn, daemon::BUS_NAME, PATH, INTERFACE).await.unwrap();
                 proxy.call_method("BeginPrompting", &callback).await.unwrap();
                 ready_rx.next().await.expect("initial PromptReady");
@@ -137,4 +167,9 @@ fn caller_disconnect_closes_the_active_prompt(bus: &Bus, ui: &common::Ui) {
     assert_eq!(request.kind, PromptKind::Password);
     disconnect_tx.send(()).unwrap();
     client.join().unwrap();
+    let events = ui.wait_events(2);
+    assert!(matches!(events.as_slice(), [UiEvent::Prompt(_), UiEvent::Close]));
+
+    let next = GcrPrompt::open(10).expect("another caller opens after the active caller disconnects");
+    next.close().unwrap();
 }

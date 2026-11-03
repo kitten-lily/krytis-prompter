@@ -338,10 +338,11 @@ async fn perform_prompt(state: &Shared, conn: &Connection, msg: &Message, sender
 async fn stop_prompting(state: &Shared, conn: &Connection, msg: &Message, sender: String) -> Result<(), MethodError> {
     let callback: OwnedObjectPath = msg.body().deserialize().map_err(invalid_args)?;
     let key = (sender, callback.to_string());
-    let was_active = end_session(state, &key);
-    if was_active {
+    let session_existed = end_session(state, &key);
+    if session_existed {
         // As gcr does: PromptDone goes out without waiting for its reply, before
-        // StopPrompting returns.
+        // StopPrompting returns. A queued session also needs this terminal
+        // callback even though it never received PromptReady.
         if let Err(e) = send_prompt_done(conn, &key).await {
             log(&format!("PromptDone to {}: {e}", key.0));
         }
@@ -359,20 +360,22 @@ async fn send_prompt_done(conn: &Connection, key: &Key) -> zbus::Result<()> {
     conn.send(&done).await
 }
 
-/// Removes `key` from the queue or the active slot. Returns whether it was
-/// the active session (whose UI was then closed).
+/// Removes `key` from the queue or the active slot. Returns whether the
+/// session existed. An active session's UI is also closed.
 fn end_session(state: &Shared, key: &Key) -> bool {
-    let ui = {
+    let (ui, existed) = {
         let mut s = state.borrow_mut();
+        let waiting_len = s.waiting.len();
         s.waiting.retain(|k| k != key);
+        let was_waiting = s.waiting.len() != waiting_len;
         if !s.active.as_ref().is_some_and(|a| &a.key == key) {
-            return false;
+            return was_waiting;
         }
         s.active = None;
-        s.ui.clone()
+        (s.ui.clone(), true)
     };
     ui.close();
-    true
+    existed
 }
 
 fn caller_gone(state: &Shared, name: &str) {
