@@ -12,6 +12,10 @@ The package names and versions were checked against Ubuntu resolute on
 2026-11-03. Recheck the workflow rather than treating this dated inventory as
 current forever.
 
+`containers/live-check.Containerfile` installs the same packages on the same
+Ubuntu, so that `mise run live-check --container` builds what CI builds. Change
+the two together.
+
 ## The Rust toolchain
 
 `jdx/mise-action` installs the exact Rust from `mise.toml`. A runner also has a

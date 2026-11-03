@@ -75,7 +75,13 @@ mise run live-check
 It opens the actual GTK layer-shell prompt on a private bus. Enter the exact phrase
 shown; the check verifies the decrypted bytes and waits for idle exit. Visually
 confirm that the dialog is centered, above fullscreen content, keyboard-exclusive,
-masked, and themed correctly.
+masked, and themed correctly, then tick its checkbox to say so.
+
+On a host without the development files, such as krytis itself, run
+`mise run live-check --container`. It builds the check in an Ubuntu container
+with podman and shows the prompt on your Wayland session, themed from your
+noctalia and GTK settings ([`docs/skills/ui.md`](docs/skills/ui.md) § The live
+check in a container).
 
 ## Security
 

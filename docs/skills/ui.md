@@ -17,6 +17,35 @@ private bus and asks the operator to type a fixed phrase. Check placement,
 exclusive keyboard focus, password masking, Cancel/Escape, colors and idle exit.
 Headless tests cover the protocol, not the surface.
 
+## The live check in a container
+
+krytis has no package manager, so a krytis host has no GTK 4, gtk4-layer-shell or
+gcr-4 development files, and `pkg-config` is missing; `mise run live-check` says
+so and stops. `mise run live-check --container` builds
+`containers/live-check.Containerfile` (CI's Ubuntu and packages, the Rust from
+`mise.toml`) and runs the check there, on the host's compositor. What it needs,
+each found the hard way on 2026-11-03:
+
+- **The Wayland socket**, bind-mounted, with `XDG_RUNTIME_DIR` mode 0700 inside.
+  Rootless podman's root is the invoking user, so it may connect.
+- **The theme inputs.** Without `~/.config/gtk-4.0` (whose `gtk.css` imports
+  noctalia's palette) and the host fonts, the dialog renders in the fallback
+  palette and the container's default font. It still works, so this is easy to
+  mistake for a theming bug. The first run on 2026-11-03 had only the noctalia
+  settings mounted, and the operator rightly refused to tick the box. The fonts
+  are all four directories the container's fontconfig searches
+  (`/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`,
+  `~/.fonts`), each mounted only if it exists on the host; a font in an unmounted
+  one is silently substituted.
+- **`label=disable`** rather than `:z`/`:Z`, which would relabel the host's socket
+  and config files.
+- **Its own `CARGO_TARGET_DIR`** under `target/`, so it never invalidates a host
+  build, and a named volume for the crate registry.
+
+An unticked box fails the check after the dialog has answered. The dialog then
+stays visible and insensitive (§ Prompt behavior) until the test exits: that is
+the failed test not calling `StopPrompting`, not a hung daemon.
+
 ## Prompt behavior
 
 The dialog persists through one caller session. After an answer it clears both
