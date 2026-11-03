@@ -32,6 +32,26 @@ real-client test proving the ordering.
 The same rule applies to `PerformPrompt`: send its empty method reply before
 showing a UI that can eventually trigger `PromptReady`.
 
+## Activation
+
+Subscribe before claiming the name. When the session bus activates the daemon,
+the call that triggered it is already queued, and the bus delivers it the moment
+`RequestName` succeeds. zbus drops a message that arrives while no
+`MessageStream` exists, so a daemon that claims first and subscribes afterwards
+never sees that `BeginPrompting`: the caller gets no reply, the idle timer exits
+the daemon, and gcr's client gives up with "Operation was cancelled".
+`daemon::Prompter::new` subscribes (method calls and `NameOwnerChanged`) when it
+is built, and `claim_name` and `run` hang off it, so the order can't be reversed.
+
+v0.1.0 had this bug: it claimed in `main` and subscribed in `run`. No test here
+saw it, because the interop test and `live-check` start the daemon before the
+client calls; only real activation reverses that. krytis's artifact gate for this
+daemon ([starlit-os/krytis#1502](https://github.com/starlit-os/krytis/issues/1502))
+found it on 2026-11-03, driving the built binary through its own activation file.
+`activating_call_is_served` in
+`tests/interop.rs` now holds the daemon between connecting and claiming while
+a `BeginPrompting` is on the wire.
+
 ## Secret exchange
 
 `src/exchange.rs` is deliberately a four-call FFI boundary around libgcr-4:

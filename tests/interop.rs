@@ -2,7 +2,7 @@ mod common;
 
 use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
 
-use common::{Bus, GcrPrompt, Script, UiEvent, start_daemon, use_bus_for_gcr};
+use common::{Bus, GcrPrompt, Script, UiEvent, start_daemon, start_daemon_held, use_bus_for_gcr};
 use futures_util::StreamExt;
 use gtk::glib;
 use krytis_prompter::{
@@ -62,6 +62,75 @@ fn real_gcr_client_and_lifecycle() {
     let idle_bus = Bus::start();
     let idle = start_daemon(&idle_bus, Some(Duration::from_millis(75)));
     assert_eq!(idle.done.recv_timeout(Duration::from_secs(2)).unwrap(), Ok(()));
+
+    activating_call_is_served();
+}
+
+/// D-Bus activation starts the daemon because of a call, and the bus delivers
+/// that call as soon as the name is claimed: before the daemon would read
+/// anything if it subscribed to its connection only after claiming. The caller
+/// then got no reply, the idle timer exited the daemon, and gcr's client gave
+/// up with "Operation was cancelled" (krytis's artifact gate, 2026-11-03).
+///
+/// Here the call reaches the daemon while it is held between connecting and
+/// claiming the name. "Reaches" is proven, not waited for: dbus-daemon handles
+/// one connection's messages in order, so once it answers the client's GetId it
+/// has already routed the BeginPrompting sent before it. Only then is the
+/// daemon released, so a slow runner can't let the test pass vacuously.
+fn activating_call_is_served() {
+    let bus = Bus::start();
+    let held = start_daemon_held(&bus);
+    let address = bus.address.clone();
+    let destination = held.unique_name.clone();
+    let (routed_tx, routed_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let ctx = glib::MainContext::new();
+        ctx.with_thread_default(|| {
+            ctx.block_on(async move {
+                let (ready, mut ready_rx) = futures_channel::mpsc::unbounded();
+                let (done, _done_rx) = futures_channel::mpsc::unbounded();
+                let conn = zbus::connection::Builder::address(address.as_str()).build().await.unwrap();
+                let callback = OwnedObjectPath::try_from("/test/Activated").unwrap();
+                conn.object_server().at(callback.clone(), Callback { ready, done }).await.unwrap();
+
+                // Sent by hand, not through a proxy, so the reply wait can start
+                // after the barrier below.
+                let mut replies = zbus::MessageStream::from(&conn);
+                let begin = zbus::Message::method_call(PATH, "BeginPrompting")
+                    .destination(destination.as_str())
+                    .interface(INTERFACE)
+                    .build(&(&callback,))
+                    .unwrap();
+                let serial = begin.primary_header().serial_num();
+                conn.send(&begin).await.unwrap();
+                zbus::fdo::DBusProxy::new(&conn).await.unwrap().get_id().await.unwrap();
+                routed_tx.send(()).unwrap();
+
+                let begun = loop {
+                    let Some(Ok(msg)) = replies.next().await else { break Err("stream ended".to_string()) };
+                    if msg.header().reply_serial() != Some(serial) {
+                        continue;
+                    }
+                    break match msg.message_type() {
+                        zbus::message::Type::MethodReturn => Ok(()),
+                        other => Err(format!("{other:?}: {msg:?}")),
+                    };
+                };
+                let ready = begun.is_ok() && ready_rx.next().await.is_some();
+                result_tx.send((begun, ready)).unwrap();
+            });
+        })
+        .unwrap();
+    });
+
+    routed_rx.recv_timeout(Duration::from_secs(5)).expect("the client never routed its BeginPrompting");
+    held.go.send(()).unwrap();
+    let (begun, ready) =
+        result_rx.recv_timeout(Duration::from_secs(5)).expect("the activating BeginPrompting got no reply");
+    assert_eq!(begun, Ok(()), "BeginPrompting failed");
+    assert!(ready, "no PromptReady after the activating BeginPrompting");
+    client.join().unwrap();
 }
 
 fn queue_waits_for_the_active_session(ui: &common::Ui) {
