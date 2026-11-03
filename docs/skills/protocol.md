@@ -45,9 +45,10 @@ is built, and `claim_name` and `run` hang off it, so the order can't be reversed
 
 v0.1.0 had this bug: it claimed in `main` and subscribed in `run`. No test here
 saw it, because the interop test and `live-check` start the daemon before the
-client calls; only real activation reverses that. krytis's
-`mise run krytis-prompter-test` found it on 2026-11-03, driving the built
-artifact through its own activation file. `activating_call_is_served` in
+client calls; only real activation reverses that. krytis's artifact gate for this
+daemon ([starlit-os/krytis#1502](https://github.com/starlit-os/krytis/issues/1502))
+found it on 2026-11-03, driving the built binary through its own activation file.
+`activating_call_is_served` in
 `tests/interop.rs` now holds the daemon between connecting and claiming while
 a `BeginPrompting` is on the wire.
 
