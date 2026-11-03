@@ -2,7 +2,7 @@ mod common;
 
 use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
 
-use common::{Bus, GcrPrompt, Script, UiEvent, start_daemon, use_bus_for_gcr};
+use common::{Bus, GcrPrompt, Script, UiEvent, start_daemon, start_daemon_held, use_bus_for_gcr};
 use futures_util::StreamExt;
 use gtk::glib;
 use krytis_prompter::{
@@ -62,6 +62,52 @@ fn real_gcr_client_and_lifecycle() {
     let idle_bus = Bus::start();
     let idle = start_daemon(&idle_bus, Some(Duration::from_millis(75)));
     assert_eq!(idle.done.recv_timeout(Duration::from_secs(2)).unwrap(), Ok(()));
+
+    activating_call_is_served();
+}
+
+/// D-Bus activation starts the daemon because of a call, and the bus delivers
+/// that call as soon as the name is claimed: before the daemon would read
+/// anything if it subscribed to its connection only after claiming. The caller
+/// then got no reply, the idle timer exited the daemon, and gcr's client gave
+/// up with "Operation was cancelled" (krytis's `mise run krytis-prompter-test`,
+/// 2026-11-03). Here the call is on the wire while the daemon is held between
+/// connecting and claiming the name.
+fn activating_call_is_served() {
+    let bus = Bus::start();
+    let held = start_daemon_held(&bus);
+    let address = bus.address.clone();
+    let destination = held.unique_name.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let ctx = glib::MainContext::new();
+        ctx.with_thread_default(|| {
+            ctx.block_on(async move {
+                let (ready, mut ready_rx) = futures_channel::mpsc::unbounded();
+                let (done, _done_rx) = futures_channel::mpsc::unbounded();
+                let conn = zbus::connection::Builder::address(address.as_str()).build().await.unwrap();
+                let callback = OwnedObjectPath::try_from("/test/Activated").unwrap();
+                conn.object_server().at(callback.clone(), Callback { ready, done }).await.unwrap();
+                let proxy = zbus::Proxy::new(&conn, destination.as_str(), PATH, INTERFACE).await.unwrap();
+                let begun = proxy.call_method("BeginPrompting", &callback).await.map(|_| ());
+                let ready = match begun {
+                    Ok(()) => ready_rx.next().await.is_some(),
+                    Err(_) => false,
+                };
+                result_tx.send((begun.map_err(|e| e.to_string()), ready)).unwrap();
+            });
+        })
+        .unwrap();
+    });
+
+    // Let the call reach the daemon's connection before it claims the name.
+    thread::sleep(Duration::from_millis(300));
+    held.go.send(()).unwrap();
+    let (begun, ready) =
+        result_rx.recv_timeout(Duration::from_secs(5)).expect("the activating BeginPrompting got no reply");
+    assert_eq!(begun, Ok(()), "BeginPrompting failed");
+    assert!(ready, "no PromptReady after the activating BeginPrompting");
+    client.join().unwrap();
 }
 
 fn queue_waits_for_the_active_session(ui: &common::Ui) {

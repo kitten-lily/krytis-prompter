@@ -31,7 +31,7 @@ use futures_util::{StreamExt, stream};
 use gtk::glib;
 use zbus::{
     Connection, Message, MessageStream, OwnedObjectPath, OwnedVariant, Variant,
-    fdo::{DBusProxy, ReleaseNameReply, RequestNameFlags, RequestNameReply},
+    fdo::{DBusProxy, NameOwnerChangedStream, ReleaseNameReply, RequestNameFlags, RequestNameReply},
     message::{Flags, Type as MessageType},
 };
 
@@ -70,14 +70,6 @@ const INTROSPECTION: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS 
 pub struct Config {
     /// `None` never exits.
     pub idle_timeout: Option<Duration>,
-}
-
-/// Claims [`BUS_NAME`] without queueing. `false` means another prompter
-/// (gnome-shell, a live `gcr-prompter`, noctalia's) already owns it, and this
-/// one should stay out of the way.
-pub async fn claim_name(conn: &Connection) -> zbus::Result<bool> {
-    let reply = DBusProxy::new(conn).await?.request_name(BUS_NAME.try_into()?, RequestNameFlags::DO_NOT_QUEUE).await?;
-    Ok(matches!(reply, RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner))
 }
 
 /// A caller's session: its unique bus name and its callback object.
@@ -124,11 +116,55 @@ enum Event {
 
 type Shared = Rc<RefCell<State>>;
 
-/// Serves the prompter on `conn` until it has been idle for
-/// `config.idle_timeout`. Claim the name first with [`claim_name`].
-pub async fn run(conn: Connection, ui: Rc<dyn PromptUi>, config: Config) -> zbus::Result<()> {
-    let messages = MessageStream::from(&conn).map(Event::Message);
-    let gone = DBusProxy::new(&conn).await?.receive_name_owner_changed().await?.filter_map(|signal| async move {
+/// The prompter's connection, already subscribed to everything it reads.
+///
+/// Build it before claiming the name. D-Bus activation starts this process
+/// because of a call, and the bus delivers that call the moment the name is
+/// claimed. zbus drops a message that arrives while nothing is subscribed, so
+/// subscribing afterwards loses the activating `BeginPrompting`: the caller
+/// never gets a reply, and the idle timer exits the daemon under it.
+/// docs/skills/protocol.md § Activation.
+pub struct Prompter {
+    conn: Connection,
+    messages: MessageStream,
+    gone: NameOwnerChangedStream,
+}
+
+impl Prompter {
+    pub async fn new(conn: Connection) -> zbus::Result<Self> {
+        let messages = MessageStream::from(&conn);
+        let gone = DBusProxy::new(&conn).await?.receive_name_owner_changed().await?;
+        Ok(Self { conn, messages, gone })
+    }
+
+    /// Claims [`BUS_NAME`] without queueing. `false` means another prompter
+    /// (gnome-shell, a live `gcr-prompter`, noctalia's) already owns it, and
+    /// this one should stay out of the way.
+    pub async fn claim_name(&self) -> zbus::Result<bool> {
+        let reply = DBusProxy::new(&self.conn)
+            .await?
+            .request_name(BUS_NAME.try_into()?, RequestNameFlags::DO_NOT_QUEUE)
+            .await?;
+        Ok(matches!(reply, RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner))
+    }
+
+    /// Serves the prompter until it has been idle for `config.idle_timeout`.
+    /// Call [`Prompter::claim_name`] first.
+    pub async fn run(self, ui: Rc<dyn PromptUi>, config: Config) -> zbus::Result<()> {
+        let Self { conn, messages, gone } = self;
+        run(conn, messages, gone, ui, config).await
+    }
+}
+
+async fn run(
+    conn: Connection,
+    messages: MessageStream,
+    gone: NameOwnerChangedStream,
+    ui: Rc<dyn PromptUi>,
+    config: Config,
+) -> zbus::Result<()> {
+    let messages = messages.map(Event::Message);
+    let gone = gone.filter_map(|signal| async move {
         let args = signal.args().ok()?;
         // A unique name losing its owner is a client disconnecting.
         (args.name().starts_with(':') && args.new_owner().is_none()).then(|| Event::CallerGone(args.name().to_string()))

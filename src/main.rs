@@ -52,11 +52,14 @@ fn main() -> ExitCode {
 
 async fn serve(idle_timeout: Option<Duration>) -> zbus::Result<()> {
     let conn = zbus::connection::Builder::session().build().await?;
-    if !daemon::claim_name(&conn).await? {
+    // Subscribe before claiming: the call that activated us arrives the moment
+    // the name is ours (daemon::Prompter).
+    let prompter = daemon::Prompter::new(conn).await?;
+    if !prompter.claim_name().await? {
         eprintln!("krytis-prompter: {} already has an owner; leaving it alone", daemon::BUS_NAME);
         return Ok(());
     }
-    daemon::run(conn, Rc::new(GtkUi::new()), daemon::Config { idle_timeout }).await
+    prompter.run(Rc::new(GtkUi::new()), daemon::Config { idle_timeout }).await
 }
 
 enum Action {

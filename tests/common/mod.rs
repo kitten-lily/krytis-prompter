@@ -156,7 +156,7 @@ impl PromptUi for ScriptedUi {
 }
 
 /// The protocol core serving `bus` on its own thread. `done` receives the
-/// result of `daemon::run` when it returns (idle exit).
+/// result of `Prompter::run` when it returns (idle exit).
 pub struct Daemon {
     pub ui: Ui,
     pub done: mpsc::Receiver<Result<(), String>>,
@@ -174,9 +174,10 @@ pub fn start_daemon(bus: &Bus, idle_timeout: Option<Duration>) -> Daemon {
             .with_thread_default(|| {
                 ctx.block_on(async move {
                     let conn = zbus::connection::Builder::address(address.as_str()).build().await?;
-                    assert!(daemon::claim_name(&conn).await?, "the prompter name was taken");
+                    let prompter = daemon::Prompter::new(conn).await?;
+                    assert!(prompter.claim_name().await?, "the prompter name was taken");
                     ready_tx.send(()).unwrap();
-                    daemon::run(conn, Rc::new(ScriptedUi(thread_ui)), daemon::Config { idle_timeout }).await
+                    prompter.run(Rc::new(ScriptedUi(thread_ui)), daemon::Config { idle_timeout }).await
                 })
             })
             .expect("thread-default context");
@@ -184,6 +185,44 @@ pub fn start_daemon(bus: &Bus, idle_timeout: Option<Duration>) -> Daemon {
     });
     ready_rx.recv_timeout(Duration::from_secs(10)).expect("daemon did not start");
     Daemon { ui, done }
+}
+
+/// A daemon held after connecting and before claiming the name, until `go`.
+/// That is the window D-Bus activation creates: the bus starts the process,
+/// and the call that activated it is already waiting when the name is claimed.
+pub struct HeldDaemon {
+    pub daemon: Daemon,
+    /// The daemon connection's unique name, to call before it owns the name.
+    pub unique_name: String,
+    pub go: mpsc::Sender<()>,
+}
+
+pub fn start_daemon_held(bus: &Bus) -> HeldDaemon {
+    let ui = Ui::default();
+    let (name_tx, name_rx) = mpsc::channel();
+    let (go, go_rx) = mpsc::channel::<()>();
+    let (done_tx, done) = mpsc::channel();
+    let address = bus.address.clone();
+    let thread_ui = ui.clone();
+    thread::spawn(move || {
+        let ctx = glib::MainContext::new();
+        let result = ctx
+            .with_thread_default(|| {
+                ctx.block_on(async move {
+                    let conn = zbus::connection::Builder::address(address.as_str()).build().await?;
+                    let unique_name = conn.unique_name().unwrap().to_string();
+                    let prompter = daemon::Prompter::new(conn).await?;
+                    name_tx.send(unique_name).unwrap();
+                    go_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    assert!(prompter.claim_name().await?, "the prompter name was taken");
+                    prompter.run(Rc::new(ScriptedUi(thread_ui)), daemon::Config { idle_timeout: None }).await
+                })
+            })
+            .expect("thread-default context");
+        let _ = done_tx.send(result.map_err(|e| e.to_string()));
+    });
+    let unique_name = name_rx.recv_timeout(Duration::from_secs(10)).expect("daemon did not connect");
+    HeldDaemon { daemon: Daemon { ui, done }, unique_name, go }
 }
 
 /// Points this process's gcr client at `bus`. Call once, before any gcr or GIO
